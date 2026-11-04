@@ -155,7 +155,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
     <div class="legend" aria-hidden="true">
       <span><i class="dot" style="background:var(--ink)"></i>Riff &amp; chords</span>
       <span><i class="dot" style="background:var(--lead)"></i>Solo</span>
-      <span id="legendStrum">↓ ↑ strums</span>
+      <span id="legendStrum">↓ ↑ strum / pick</span>
       <span>— note length</span>
     </div>
     <div class="transport">
@@ -193,8 +193,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
         <div class="pbody">
           <div class="row"><label for="countIn">Count-in (1 bar)</label><input id="countIn" class="sw" type="checkbox"></div>
           <div class="row"><label for="metro">Metronome click</label><input id="metro" class="sw" type="checkbox"></div>
-          <div class="row"><label for="arrows">Strum arrows</label><input id="arrows" class="sw" type="checkbox"></div>
-          <p class="hint">Arrows show under the tab in the strummed sections: Choruses, Verse 2 and Interludes. The riff sections are single picked notes.</p>
+          <div class="row"><label for="arrows">Strum &amp; pick arrows</label><input id="arrows" class="sw" type="checkbox"></div>
+          <p class="hint">Dark arrows are strums. Grey arrows on single notes are pick directions using alternate picking: down on the beat, up on the &amp;. Neither source marks pick directions, so these follow that convention.</p>
           <div class="row">
             <label for="bpm">Tempo at 100%</label>
             <span class="inline"><input id="bpm" type="number" min="40" max="220" step="1" inputmode="numeric"> BPM</span>
@@ -252,6 +252,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
             <li><b>Note lengths, section lengths and solo rhythm:</b> The Music Dept “Come As You Are” jam chart (2018).</li>
             <li><b>Tempo:</b> not listed in either source. 120 BPM is an estimate.</li>
             <li><b>Solo, 4th bar of the phrase:</b> dc’s tab has one more note than the chart’s rhythm. The first 13 in that bar (marked *) is played where the chart holds a note.</li>
+            <li><b>Pick directions:</b> not in either source. The grey arrows use alternate picking (down on the beat, up on the &amp;).</li>
             <li><b>Strumming:</b> D DU UDU (down on 1, down–up on 2 &amp;, up on 3 &amp;, down–up on 4 &amp;) in every strummed section.</li>
             <li>Lyrics aren’t included.</li>
           </ul>
@@ -422,8 +423,19 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
     const gIn = g(0), acIn = g(0), elIn = g(0), toneOut = g(1);
     gIn.connect(acIn); gIn.connect(elIn);
     // Acoustic: body resonances and some sparkle
-    const hp = filt('highpass', 75, .7), b1 = filt('peaking', 110, 1.1, 4), b2 = filt('peaking', 240, 1.2, -2), sh = filt('highshelf', 3800, null, 4);
-    acIn.connect(hp).connect(b1).connect(b2).connect(sh).connect(toneOut);
+    // Acoustic: a short synthetic body response (direct sound + decaying wood/air resonances)
+    const sr = ctx.sampleRate, bl = Math.floor(sr * .14), bir = ctx.createBuffer(1, bl, sr), bd = bir.getChannelData(0);
+    bd[0] = 1;
+    // [frequency Hz, decay s, peak boost (linear, added to the direct sound)]
+    [[100, .07, 1.6], [204, .05, 1.4], [245, .04, .9], [390, .03, .8], [530, .025, .6], [690, .02, .55],
+     [1020, .014, .45], [1480, .01, .35], [2250, .007, .25], [3300, .005, .18]].forEach(([mf, tau, pk]) => {
+      const amp = pk * 2 / (sr * tau);
+      for (let i = 0; i < bl; i++) { const tt = i / sr; bd[i] += amp * Math.exp(-tt / tau) * Math.cos(2 * Math.PI * mf * tt); }
+    });
+    for (let i = 1; i < bl; i++) bd[i] += (Math.random() * 2 - 1) * .02 * Math.exp(-i / sr / .01);
+    const body = ctx.createConvolver(); body.normalize = false; body.buffer = bir;
+    const hp = filt('highpass', 70, .7), sh = filt('highshelf', 5000, null, 1.5), top = filt('lowpass', 10000, .7), acLevel = g(.6);
+    acIn.connect(hp).connect(body).connect(sh).connect(top).connect(acLevel).connect(toneOut);
     // Electric: soft clipping, mids, speaker roll-off
     const pre = g(2.2), ws = ctx.createWaveShaper(), curve = new Float32Array(2048);
     for (let i = 0; i < curve.length; i++) { const x = i / (curve.length - 1) * 2 - 1; curve[i] = Math.tanh(2.4 * x) / Math.tanh(2.4); }
@@ -447,7 +459,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
     conv.buffer = ir;
     const rev = g(0); toneOut.connect(conv).connect(rev).connect(master);
     const click = g(0); click.connect(master);
-    N = { gIn, acIn, elIn, chorusWet, rev, click };
+    N = { gIn, acIn, elIn, chorusWet, rev, click, toneOut, acLevel };
     applySound();
     return ctx;
   }
@@ -457,15 +469,71 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
     set(N.gIn.gain, S.guitar ? S.gVol : 0);
     set(N.acIn.gain, S.tone === 'acoustic' ? 1 : 0);
     set(N.elIn.gain, S.tone === 'electric' ? 1 : 0);
-    set(N.chorusWet.gain, S.chorus ? .75 : 0);
+    set(N.chorusWet.gain, S.chorus ? (S.tone === 'acoustic' ? .35 : .75) : 0);
     set(N.rev.gain, S.tone === 'acoustic' ? .2 : .12);
     set(N.click.gain, S.cVol);
   }
 
-  // Plucked string (Karplus-Strong), rendered once per pitch and tuned exactly with playbackRate
-  function voiceBuf(midi) {
-    let v = bufCache.get(midi);
-    if (v) return v;
+  // Plucked strings (Karplus-Strong). Each pitch gets a few takes so repeated notes differ.
+  const TAKES = 3;
+  function voiceBuf(midi, tone) {
+    tone = tone || S.tone;
+    const key = tone + ':' + midi;
+    let takes = bufCache.get(key);
+    if (!takes) { takes = []; bufCache.set(key, takes); }
+    if (takes.length < TAKES) { const v = tone === 'acoustic' ? renderAcoustic(midi) : renderElectric(midi); takes.push(v); return v; }
+    return takes[Math.floor(Math.random() * takes.length)];
+  }
+  function toBuffer(y) {
+    const sr = ctx.sampleRate, len = y.length;
+    let peak = 0; for (let i = 0; i < len; i++) peak = Math.max(peak, Math.abs(y[i]));
+    const k = peak > 0 ? .8 / peak : 1, fade = Math.floor(sr * .03);
+    for (let i = 0; i < len; i++) y[i] *= k * (i > len - fade ? (len - i) / fade : 1);
+    const buf = ctx.createBuffer(1, len, sr);
+    buf.getChannelData(0).set(y);
+    return buf;
+  }
+  // Acoustic: bright pick noise, a 3-tap loop filter that keeps more overtones, exact tuning through a
+  // fractional delay, a two-stage decay (fast then slow, like a real string) and a short pick click.
+  function renderAcoustic(midi) {
+    const sr = ctx.sampleRate, f = 440 * Math.pow(2, (midi - 69) / 12);
+    const t60 = Math.max(1.3, 4.6 - 1.1 * Math.log2(f / 82.4));
+    const len = Math.floor(sr * Math.min(t60, 3));
+    const P0 = Math.max(4, Math.round(sr / f));
+    const exc = new Float32Array(P0), e2 = new Float32Array(P0);
+    let lp = 0, mean = 0;
+    const bright = .78 + Math.random() * .1;
+    for (let i = 0; i < P0; i++) { lp += bright * ((Math.random() * 2 - 1) - lp); exc[i] = lp; }
+    const pick = Math.max(1, Math.round(P0 * (.15 + Math.random() * .04)));
+    for (let i = 0; i < P0; i++) { e2[i] = exc[i] - (i >= pick ? exc[i - pick] : 0); mean += e2[i]; }
+    mean /= P0;
+    const out = new Float32Array(len);
+    const c = .16;              // loop filter [c, 1-2c, c]: delay exactly 1 sample, gentler than a 2-point average
+    const D = sr / f - 1;       // so the whole loop is sr/f samples long
+    [[t60, .7], [t60 * .35, .3]].forEach(([t6, gain]) => {
+      const rho = Math.pow(10, -3 / (t6 * f));
+      const y = new Float32Array(len);
+      for (let n = 0; n < len; n++) {
+        let fb = 0;
+        const pp = n - D;
+        if (pp >= 2) {
+          const i0 = Math.floor(pp), fr = pp - i0;
+          const a0 = y[i0] * (1 - fr) + y[i0 + 1] * fr;
+          const a1 = y[i0 - 1] * (1 - fr) + y[i0] * fr;
+          const a2 = y[i0 - 2] * (1 - fr) + y[i0 - 1] * fr;
+          fb = rho * (c * a0 + (1 - 2 * c) * a1 + c * a2);
+        }
+        y[n] = (n < P0 ? e2[n] - mean : 0) + fb;
+        out[n] += gain * y[n];
+      }
+    });
+    let peak = 0; for (let i = 0; i < len; i++) peak = Math.max(peak, Math.abs(out[i]));
+    const clickLen = Math.floor(sr * .005);
+    let prev = 0;
+    for (let n = 0; n < clickLen; n++) { const w = Math.random() * 2 - 1; out[n] += peak * .35 * (w - prev) * (1 - n / clickLen); prev = w; }
+    return { buf: toBuffer(out), rate: 1 };
+  }
+  function renderElectric(midi) {
     const sr = ctx.sampleRate, f = 440 * Math.pow(2, (midi - 69) / 12);
     const P = Math.max(2, Math.floor(sr / f - .5)), fAct = sr / (P + .5);
     const t60 = Math.max(1.8, 6.5 - 1.3 * Math.log2(f / 82.4));
@@ -483,14 +551,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
       const y1 = i >= P ? y[i - P] : 0, y2 = i > P ? y[i - P - 1] : 0;
       y[i] = x + rho * .5 * (y1 + y2);
     }
-    let peak = 0; for (let i = 0; i < len; i++) peak = Math.max(peak, Math.abs(y[i]));
-    const k = peak > 0 ? .8 / peak : 1, fade = Math.floor(sr * .03);
-    for (let i = 0; i < len; i++) y[i] *= k * (i > len - fade ? (len - i) / fade : 1);
-    const buf = ctx.createBuffer(1, len, sr);
-    buf.getChannelData(0).set(y);
-    v = { buf, rate: f / fAct };
-    bufCache.set(midi, v);
-    return v;
+    return { buf: toBuffer(y), rate: f / fAct };
   }
   function prewarm() {
     const open = TUNINGS[S.tuning].open, need = new Set();
@@ -500,7 +561,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
       ev.strums.forEach(st => CHORDS[st.chord].forEach((f, s) => { if (f != null) need.add(open[s] + f); }));
     }));
     PICKUP.forEach(x => need.add(open[x.s] + x.f));
-    need.forEach(m => voiceBuf(m));
+    need.forEach(m => { const k = S.tone + ':' + m; if (!bufCache.has(k) || !bufCache.get(k).length) voiceBuf(m); });
   }
 
   function playNote(midi, t, dur, o) {
@@ -880,6 +941,18 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
         }
         c2d.globalAlpha = 1;
       });
+      // pick directions for single notes: alternate picking (down on the beat, up on the &)
+      if (S.strumArrows && bar.notes.length) {
+        const onsets = new Map();
+        bar.notes.forEach(x => { const d = x.dEff != null ? x.dEff : x.d; onsets.set(x.b, Math.min(d, onsets.has(x.b) ? onsets.get(x.b) : d)); });
+        onsets.forEach((d, b) => {
+          const ab = k * 4 + b, len = Math.min(d, .5);
+          const on = playing && beat >= ab && beat < ab + len, past = beat >= ab + len;
+          c2d.globalAlpha = past && !on ? .35 : 1;
+          arrow(xOf(ab), arrowY, b % 1 === 0 ? 'D' : 'U', 10, on ? colors['--accent'] : colors['--muted']);
+        });
+        c2d.globalAlpha = 1;
+      }
       // notes
       bar.notes.forEach(x => {
         const ab = k * 4 + x.b, d = x.dEff != null ? x.dEff : x.d;
@@ -972,6 +1045,6 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { dirty = true; });
   requestAnimationFrame(frame);
 
-  window.__pa = { S, P, buildPlan, setSpeed, play, pause, get ctx() { return ctx; } };
+  window.__pa = { S, P, buildPlan, setSpeed, play, pause, ensureAudio, voiceBuf, get ctx() { return ctx; }, get nodes() { return N; } };
 })();
 </script>
