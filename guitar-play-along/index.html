@@ -418,7 +418,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
     const g = (v) => { const x = ctx.createGain(); x.gain.value = v; return x; };
     const filt = (type, f, q, gain) => { const x = ctx.createBiquadFilter(); x.type = type; x.frequency.value = f; if (q != null) x.Q.value = q; if (gain != null) x.gain.value = gain; return x; };
     const comp = ctx.createDynamicsCompressor();
-    comp.threshold.value = -14; comp.ratio.value = 5; comp.attack.value = .004; comp.release.value = .2;
+    comp.threshold.value = -14; comp.ratio.value = 5; comp.attack.value = .001; comp.release.value = .2;
     const master = g(.95); master.connect(comp).connect(ctx.destination);
     const gIn = g(0), acIn = g(0), elIn = g(0), toneOut = g(1);
     gIn.connect(acIn); gIn.connect(elIn);
@@ -434,10 +434,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
     });
     for (let i = 1; i < bl; i++) bd[i] += (Math.random() * 2 - 1) * .02 * Math.exp(-i / sr / .01);
     const body = ctx.createConvolver(); body.normalize = false; body.buffer = bir;
-    const hp = filt('highpass', 70, .7), sh = filt('highshelf', 5000, null, 1.5), top = filt('lowpass', 10000, .7), acLevel = g(.6);
+    const hp = filt('highpass', 70, .7), sh = filt('highshelf', 5000, null, 1.5), top = filt('lowpass', 10000, .7), acLevel = g(5);
     acIn.connect(hp).connect(body).connect(sh).connect(top).connect(acLevel).connect(toneOut);
     // Electric: soft clipping, mids, speaker roll-off
-    const pre = g(2.2), ws = ctx.createWaveShaper(), curve = new Float32Array(2048);
+    const pre = g(2.2 * .8 / .45), ws = ctx.createWaveShaper(), curve = new Float32Array(2048);
     for (let i = 0; i < curve.length; i++) { const x = i / (curve.length - 1) * 2 - 1; curve[i] = Math.tanh(2.4 * x) / Math.tanh(2.4); }
     ws.curve = curve; ws.oversample = '2x';
     const mid = filt('peaking', 850, .9, 3), cab = filt('lowpass', 4300, .8), post = g(.55);
@@ -459,7 +459,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
     conv.buffer = ir;
     const rev = g(0); toneOut.connect(conv).connect(rev).connect(master);
     const click = g(0); click.connect(master);
-    N = { gIn, acIn, elIn, chorusWet, rev, click, toneOut, acLevel };
+    N = { gIn, acIn, elIn, chorusWet, rev, click, toneOut, acLevel, comp };
     applySound();
     return ctx;
   }
@@ -487,26 +487,38 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
   function toBuffer(y) {
     const sr = ctx.sampleRate, len = y.length;
     let peak = 0; for (let i = 0; i < len; i++) peak = Math.max(peak, Math.abs(y[i]));
-    const k = peak > 0 ? .8 / peak : 1, fade = Math.floor(sr * .03);
+    const k = peak > 0 ? .45 / peak : 1, fade = Math.floor(sr * .03);
     for (let i = 0; i < len; i++) y[i] *= k * (i > len - fade ? (len - i) / fade : 1);
     const buf = ctx.createBuffer(1, len, sr);
     buf.getChannelData(0).set(y);
     return buf;
   }
-  // Acoustic: bright pick noise, a 3-tap loop filter that keeps more overtones, exact tuning through a
+  // Pluck excitation for one period: the string velocity shape a pick leaves (a zero-mean step at the pick
+  // point) gives a strong fundamental every time. A little noise adds texture; smoothing sets brightness.
+  function pluckExcitation(P, pickFrac, smooth, noiseAmt) {
+    const p = Math.max(1, Math.round(P * pickFrac)), hi = (P - p) / P, lo = -p / P;
+    const nz = new Float32Array(P);
+    let lp = 0, nm = 0, nr = 0;
+    for (let i = 0; i < P; i++) { lp += .5 * ((Math.random() * 2 - 1) - lp); nz[i] = lp; nm += lp; }
+    nm /= P;
+    for (let i = 0; i < P; i++) { nz[i] -= nm; nr += nz[i] * nz[i]; }
+    const stepRms = Math.sqrt((p * hi * hi + (P - p) * lo * lo) / P), k = nr > 0 ? noiseAmt * stepRms / Math.sqrt(nr / P) : 0;
+    const raw = new Float32Array(P), out = new Float32Array(P);
+    for (let i = 0; i < P; i++) raw[i] = (i < p ? hi : lo) + k * nz[i];
+    let st = raw[P - 1], mean = 0;
+    for (let pass = 0; pass < 2; pass++) for (let i = 0; i < P; i++) { st += smooth * (raw[i] - st); if (pass) { out[i] = st; mean += st; } }
+    mean /= P;
+    for (let i = 0; i < P; i++) out[i] -= mean;
+    return out;
+  }
+  // Acoustic: a 3-tap loop filter that keeps more overtones, exact tuning through a
   // fractional delay, a two-stage decay (fast then slow, like a real string) and a short pick click.
   function renderAcoustic(midi) {
     const sr = ctx.sampleRate, f = 440 * Math.pow(2, (midi - 69) / 12);
     const t60 = Math.max(1.3, 4.6 - 1.1 * Math.log2(f / 82.4));
     const len = Math.floor(sr * Math.min(t60, 3));
     const P0 = Math.max(4, Math.round(sr / f));
-    const exc = new Float32Array(P0), e2 = new Float32Array(P0);
-    let lp = 0, mean = 0;
-    const bright = .78 + Math.random() * .1;
-    for (let i = 0; i < P0; i++) { lp += bright * ((Math.random() * 2 - 1) - lp); exc[i] = lp; }
-    const pick = Math.max(1, Math.round(P0 * (.15 + Math.random() * .04)));
-    for (let i = 0; i < P0; i++) { e2[i] = exc[i] - (i >= pick ? exc[i - pick] : 0); mean += e2[i]; }
-    mean /= P0;
+    const e2 = pluckExcitation(P0, .17, .8 + (Math.random() - .5) * .03, .2);
     const out = new Float32Array(len);
     const c = .16;              // loop filter [c, 1-2c, c]: delay exactly 1 sample, gentler than a 2-point average
     const D = sr / f - 1;       // so the whole loop is sr/f samples long
@@ -523,7 +535,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
           const a2 = y[i0 - 2] * (1 - fr) + y[i0 - 1] * fr;
           fb = rho * (c * a0 + (1 - 2 * c) * a1 + c * a2);
         }
-        y[n] = (n < P0 ? e2[n] - mean : 0) + fb;
+        y[n] = (n < P0 ? e2[n] : 0) + fb;
         out[n] += gain * y[n];
       }
     });
@@ -539,15 +551,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
     const t60 = Math.max(1.8, 6.5 - 1.3 * Math.log2(f / 82.4));
     const len = Math.floor(sr * Math.min(t60, 3.5));
     const rho = Math.pow(10, -3 / (t60 * fAct));
-    const exc = new Float32Array(P);
-    let lp = 0, mean = 0;
-    for (let i = 0; i < P; i++) { lp += .6 * ((Math.random() * 2 - 1) - lp); exc[i] = lp; }
-    const pick = Math.max(1, Math.round(P * .14)), e2 = new Float32Array(P);
-    for (let i = 0; i < P; i++) { e2[i] = exc[i] - (i >= pick ? exc[i - pick] : 0); mean += e2[i]; }
-    mean /= P;
+    const e2 = pluckExcitation(P, .14, .55 + (Math.random() - .5) * .03, .2);
     const y = new Float32Array(len);
     for (let i = 0; i < len; i++) {
-      const x = i < P ? e2[i] - mean : 0;
+      const x = i < P ? e2[i] : 0;
       const y1 = i >= P ? y[i - P] : 0, y2 = i > P ? y[i - P - 1] : 0;
       y[i] = x + rho * .5 * (y1 + y2);
     }
@@ -1045,6 +1052,6 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { dirty = true; });
   requestAnimationFrame(frame);
 
-  window.__pa = { S, P, buildPlan, setSpeed, play, pause, ensureAudio, voiceBuf, get ctx() { return ctx; }, get nodes() { return N; } };
+  window.__pa = { S, P, buildPlan, setSpeed, play, pause, ensureAudio, voiceBuf, _renderAcoustic: m => renderAcoustic(m), _renderElectric: m => renderElectric(m), get ctx() { return ctx; }, get nodes() { return N; } };
 })();
 </script>
