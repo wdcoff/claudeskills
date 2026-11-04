@@ -155,7 +155,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
     <div class="legend" aria-hidden="true">
       <span><i class="dot" style="background:var(--ink)"></i>Riff &amp; chords</span>
       <span><i class="dot" style="background:var(--lead)"></i>Solo</span>
-      <span>↓ ↑ strums</span>
+      <span id="legendStrum">↓ ↑ strums</span>
       <span>— note length</span>
     </div>
     <div class="transport">
@@ -193,6 +193,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
         <div class="pbody">
           <div class="row"><label for="countIn">Count-in (1 bar)</label><input id="countIn" class="sw" type="checkbox"></div>
           <div class="row"><label for="metro">Metronome click</label><input id="metro" class="sw" type="checkbox"></div>
+          <div class="row"><label for="arrows">Strum arrows</label><input id="arrows" class="sw" type="checkbox"></div>
+          <p class="hint">Arrows show under the tab in the strummed sections: Choruses, Verse 2 and Interludes. The riff sections are single picked notes.</p>
           <div class="row">
             <label for="bpm">Tempo at 100%</label>
             <span class="inline"><input id="bpm" type="number" min="40" max="220" step="1" inputmode="numeric"> BPM</span>
@@ -396,7 +398,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
   /* ---------- Settings ---------- */
   const KEY = 'come-as-you-are-playalong.v1';
   const S = { speed: 60, bpm: 120, countIn: true, metro: true, trainer: false, trStep: 5, trEvery: 2, trTarget: 100,
-    guitar: true, tone: 'acoustic', chorus: true, gVol: .8, cVol: .55, tuning: 'half', section: 'song', loop: false };
+    strumArrows: true, guitar: true, tone: 'acoustic', chorus: true, gVol: .8, cVol: .55, tuning: 'half', section: 'song', loop: false };
   try { const saved = JSON.parse(localStorage.getItem(KEY) || 'null'); if (saved && typeof saved === 'object') Object.keys(S).forEach(k => { if (k in saved && typeof saved[k] === typeof S[k]) S[k] = saved[k]; }); } catch (e) { /* storage unavailable */ }
   if (!SECTIONS.some(s => s.id === S.section) && S.section !== 'song') S.section = 'song';
   if (!TUNINGS[S.tuning]) S.tuning = 'half';
@@ -656,7 +658,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
     dirty = true;
   }
   function syncPlayButton() {
-    $('icoPlay').hidden = P.playing; $('icoPause').hidden = !P.playing;
+    // SVG elements ignore the .hidden property, so set the attribute directly
+    $('icoPlay').toggleAttribute('hidden', P.playing);
+    $('icoPause').toggleAttribute('hidden', !P.playing);
     $('play').setAttribute('aria-label', P.playing ? 'Pause' : 'Play');
   }
   function setSpeed(v) {
@@ -734,6 +738,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
   for (let v = 30; v <= 125; v += 5) { const o = document.createElement('option'); o.textContent = v; $('trTarget').appendChild(o); }
   bindSwitch('countIn', 'countIn');
   bindSwitch('metro', 'metro');
+  bindSwitch('arrows', 'strumArrows', () => { $('legendStrum').toggleAttribute('hidden', !S.strumArrows); dirty = true; });
+  $('legendStrum').toggleAttribute('hidden', !S.strumArrows);
   bindSwitch('trainer', 'trainer');
   bindSelect('trStep', 'trStep'); bindSelect('trEvery', 'trEvery'); bindSelect('trTarget', 'trTarget');
   bindSwitch('guitar', 'guitar', applySound);
@@ -859,7 +865,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
         const ab = k * 4 + st.b, x = xOf(ab);
         const on = playing && beat >= ab && beat < ab + st.d, past = beat >= ab + st.d && (playing || beat > ab);
         c2d.globalAlpha = past && !on ? .4 : 1;
-        arrow(x, arrowY, st.dir, st.dir === 'D' ? 14 : 11, on ? colors['--accent'] : colors['--ink']);
+        if (S.strumArrows) arrow(x, arrowY, st.dir, st.dir === 'D' ? 14 : 11, on ? colors['--accent'] : colors['--ink']);
         if (i === 0) {
           const frets = CHORDS[st.chord];
           c2d.font = mono; c2d.textAlign = 'center';
